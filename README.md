@@ -1,4 +1,4 @@
-# IM Bridge — Mattermost ⇄ Discord
+# IM Bridge - Mattermost ⇄ Discord
 
 Stack Docker Compose qui déploie un serveur **Mattermost** (messagerie) et un **bridge vers Discord**, afin que les utilisateurs présents sur Discord puissent échanger avec ceux de Mattermost sans changer d'outil.
 
