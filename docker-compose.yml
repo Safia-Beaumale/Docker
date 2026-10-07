@@ -83,3 +83,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
+  bridge:
+    <<: *common
+    build:
+      context: ./mattermost/bridge
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN:-}
+      - DISCORD_SERVER=${DISCORD_SERVER:-}
+      - DISCORD_CHANNEL=${DISCORD_CHANNEL:-}
+      - MATTERMOST_BOT_TOKEN=${MATTERMOST_BOT_TOKEN:-}
+      - MATTERMOST_TEAM=${MATTERMOST_TEAM:-}
+      - MATTERMOST_CHANNEL=${MATTERMOST_CHANNEL:-}
+    networks:
+      - frontend
+    depends_on:
+      mattermost:
+        condition: service_healthy
