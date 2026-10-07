@@ -50,7 +50,7 @@ flowchart LR
         db[(PostgreSQL 15)]
     end
 
-    subgraph bridge_net [réseau bridge]
+    subgraph frontend
         bridge[Matterbridge]
     end
 
@@ -76,7 +76,7 @@ Principes :
 | `db`         | `postgres:15-alpine`                                    | Base de données de Mattermost                           | `backend`                |
 | `mattermost` | `mattermost/mattermost-enterprise-edition:release-9.11` | Serveur de messagerie (API + WebSocket sur `:8065`)     | `frontend`, `backend`    |
 | `nginx`      | `nginx:alpine`                                          | Reverse proxy, point d'entrée unique, upgrade WebSocket | `frontend`               |
-| `bridge`     | Matterbridge (build multi-stage)                        | Relais des messages Mattermost ⇄ Discord                | `backend` / réseau dédié |
+| `bridge`     | `42wim/matterbridge:1.26.0`                             | Relais des messages Mattermost ⇄ Discord                | `frontend`               |
 
 Volumes persistants : `db-data`, `mm-data`, `mm-config`, `mm-logs`, `mm-plugins`.
 
@@ -160,7 +160,9 @@ Mattermost lit directement les variables préfixées `MM_` pour surcharger son `
 
 ## Configurer le bridge Discord
 
-Le bridge repose sur [Matterbridge](https://github.com/42wim/matterbridge), qui supporte nativement Mattermost et Discord. La configuration se trouve dans [`mattermost/bridge/`](mattermost/bridge/) ; les secrets sont injectés par variables d'environnement et ne sont jamais écrits dans le fichier de configuration.
+Le bridge repose sur [Matterbridge](https://github.com/42wim/matterbridge), qui supporte nativement Mattermost et Discord. La configuration se trouve dans [`mattermost/bridge/matterbridge.toml.tmpl`](mattermost/bridge/matterbridge.toml.tmpl) (Matterbridge n'accepte que le format TOML). Au démarrage, `entrypoint.sh` vérifie que les variables du `.env` sont renseignées puis les injecte dans le template avec `envsubst` : les secrets ne sont jamais écrits dans le dépôt.
+
+Le bridge parle directement à `mattermost:8065` via le réseau `frontend` ; il n'a pas accès au réseau `backend` (base de données).
 
 ### 1. Créer le bot Discord
 
@@ -250,8 +252,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watc
     │   ├── Dockerfile          # Nginx Alpine
     │   └── nginx.conf          # Reverse proxy + upgrade WebSocket
     └── bridge/
-        ├── Dockerfile          # Matterbridge (build multi-stage)
-        └── config.yaml         # Passerelles Mattermost ⇄ Discord
+        ├── Dockerfile              # Matterbridge, utilisateur non-root
+        ├── entrypoint.sh           # Vérifie le .env et génère la config
+        └── matterbridge.toml.tmpl  # Passerelle Mattermost ⇄ Discord (template)
 ```
 
 ---

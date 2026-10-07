@@ -1,0 +1,34 @@
+# Template Matterbridge — les ${VARIABLES} sont remplacées au démarrage
+# par entrypoint.sh à partir du .env. Ne jamais écrire de secret ici.
+
+[general]
+RemoteNickFormat="[{PROTOCOL}] <{NICK}> "
+
+[mattermost.mm]
+# Accès direct au conteneur via le réseau Docker (pas de passage par Nginx)
+Server="mattermost:8065"
+NoTLS=true
+Team="${MATTERMOST_TEAM}"
+# Token du compte bot Mattermost
+Token="${MATTERMOST_BOT_TOKEN}"
+PrefixMessagesWithNick=true
+PreserveThreading=true
+
+[discord.discord]
+Token="${DISCORD_TOKEN}"
+Server="${DISCORD_SERVER}"
+# Utilise un webhook pour afficher le pseudo/avatar d'origine (permission Manage Webhooks)
+AutoWebhooks=true
+PreserveThreading=true
+
+[[gateway]]
+name="mattermost-discord"
+enable=true
+
+[[gateway.inout]]
+account="mattermost.mm"
+channel="${MATTERMOST_CHANNEL}"
+
+[[gateway.inout]]
+account="discord.discord"
+channel="${DISCORD_CHANNEL}"
