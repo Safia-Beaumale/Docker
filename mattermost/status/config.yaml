@@ -1,0 +1,66 @@
+# Page de statut Gatus — https://github.com/TwiN/gatus
+# Les vérifications passent par le réseau Docker « frontend » : la page de statut
+# n'a pas accès au réseau « backend », l'état de PostgreSQL est lu via Mattermost.
+
+web:
+  port: 8080
+
+storage:
+  type: sqlite
+  path: /data/data.db
+
+ui:
+  title: Statut — IM Bridge
+  header: IM Bridge — Mattermost ⇄ Discord
+  description: État des services du stack
+  dashboard-heading: État des services
+  dashboard-subheading: Mattermost, sa base de données, Nginx et le bridge Discord, vérifiés toutes les 30 secondes
+
+endpoints:
+  - name: Nginx (point d'entrée)
+    group: Messagerie
+    # Traverse Nginx jusqu'à Mattermost : vérifie le chemin complet suivi par les utilisateurs
+    url: "http://nginx/api/v4/system/ping"
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].status == OK"
+      - "[RESPONSE_TIME] < 1000"
+
+  - name: Mattermost
+    group: Messagerie
+    url: "http://mattermost:8065/api/v4/system/ping?get_server_status=true"
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].status == OK"
+      - "[BODY].filestore_status == OK"
+
+  - name: PostgreSQL
+    group: Messagerie
+    url: "http://mattermost:8065/api/v4/system/ping?get_server_status=true"
+    interval: 30s
+    conditions:
+      - "[BODY].database_status == OK"
+
+  - name: Bridge — connexion Mattermost
+    group: Bridge Discord
+    url: "http://bridge:8080/health"
+    interval: 30s
+    conditions:
+      - "[BODY].mattermost == true"
+
+  - name: Bridge — connexion Discord
+    group: Bridge Discord
+    url: "http://bridge:8080/health"
+    interval: 30s
+    conditions:
+      - "[BODY].discord == true"
+
+  - name: API Discord
+    group: Services externes
+    url: "https://discord.com/api/v10/gateway"
+    interval: 5m
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].url == pat(wss://*)"

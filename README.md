@@ -12,6 +12,7 @@ Stack Docker Compose qui déploie un serveur **Mattermost** (messagerie) et un *
 - [Démarrage rapide](#démarrage-rapide)
 - [Variables d'environnement](#variables-denvironnement)
 - [Configurer le bridge Discord](#configurer-le-bridge-discord)
+- [Page de statut](#page-de-statut)
 - [Stack de développement](#stack-de-développement)
 - [Fonctionnalités Docker avancées](#fonctionnalités-docker-avancées)
 - [Sécurité](#sécurité)
@@ -52,9 +53,12 @@ flowchart LR
 
     subgraph frontend
         bridge[Bridge Node.js<br/>:8080]
+        status[Gatus<br/>page de statut]
     end
 
     nginx --> mattermost
+    nginx -->|status.localhost| status
+    status -.->|vérifications| nginx & mattermost & bridge
     mattermost --> db
     bridge -->|API + WebSocket| mattermost
     mattermost -.->|boutons des sondages| bridge
@@ -78,8 +82,9 @@ Principes :
 | `mattermost` | `mattermost/mattermost-enterprise-edition:release-9.11` | Serveur de messagerie (API + WebSocket sur `:8065`)     | `frontend`, `backend`    |
 | `nginx`      | `nginx:alpine`                                          | Reverse proxy, point d'entrée unique, upgrade WebSocket | `frontend`               |
 | `bridge`     | `node:24-alpine` (bridge maison en TypeScript)          | Relais Mattermost ⇄ Discord (messages, réactions, fichiers, sondages…) | `frontend` |
+| `status`     | `twinproduction/gatus:v5.37.0`                          | Page de statut des services, servie sur `http://status.localhost` | `frontend` |
 
-Volumes persistants : `db-data`, `mm-data`, `mm-config`, `mm-logs`, `mm-plugins`, `bridge-data` (correspondance des IDs de messages entre les deux plateformes).
+Volumes persistants : `db-data`, `mm-data`, `mm-config`, `mm-logs`, `mm-plugins`, `bridge-data` (correspondance des IDs de messages entre les deux plateformes), `status-data` (historique de la page de statut).
 
 ---
 
@@ -113,6 +118,8 @@ docker compose ps
 ```
 
 5. Ouvrir <http://localhost> (ou le port défini dans `NGINX_PORT`), créer le compte administrateur et la première équipe Mattermost.
+
+6. L'état des services est visible sur <http://status.localhost> (voir [Page de statut](#page-de-statut)).
 
 ---
 
@@ -223,6 +230,23 @@ Un message posté dans le canal Mattermost doit apparaître dans le salon Discor
 
 ---
 
+## Page de statut
+
+Le service `status` ([Gatus](https://github.com/TwiN/gatus)) vérifie les services toutes les 30 secondes et affiche leur état et leur historique sur <http://status.localhost>. Nginx le sert sur le même port 80 que Mattermost, en se basant sur le nom d'hôte : les navigateurs résolvent `*.localhost` vers la machine locale, sans rien configurer. Les vérifications sont décrites dans [`mattermost/status/config.yaml`](mattermost/status/config.yaml).
+
+| Vérification                   | Comment                                                                          |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| Nginx (point d'entrée)         | `GET http://nginx/api/v4/system/ping` : chemin complet Nginx → Mattermost         |
+| Mattermost                     | `GET /api/v4/system/ping?get_server_status=true` : serveur et stockage de fichiers |
+| PostgreSQL                     | Champ `database_status` de cette même réponse                                     |
+| Bridge — connexion Mattermost  | `GET http://bridge:8080/health` → `mattermost: true` (WebSocket ouvert)           |
+| Bridge — connexion Discord     | `GET http://bridge:8080/health` → `discord: true` (gateway connectée)             |
+| API Discord                    | `GET https://discord.com/api/v10/gateway`, toutes les 5 minutes                   |
+
+La page de statut n'est attachée qu'au réseau `frontend` : elle n'a pas accès à la base de données, dont l'état est lu à travers Mattermost.
+
+---
+
 ## Stack de développement
 
 Le fichier [`docker-compose.dev.yml`](docker-compose.dev.yml) surcharge la configuration de production pour faciliter le développement et la mise au point de la configuration :
@@ -256,7 +280,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watc
 ## Sécurité
 
 - **Secrets hors du dépôt** : `.env` est ignoré par Git, seul `.env.example` (valeurs factices) est versionné.
-- **Surface d'exposition minimale** : un seul port publié (Nginx). Mattermost, PostgreSQL et le bridge ne sont accessibles que sur les réseaux internes.
+- **Surface d'exposition minimale** : un seul port publié (Nginx). Mattermost, PostgreSQL, le bridge et la page de statut ne sont accessibles que sur les réseaux internes.
 - **Isolation réseau** : la base de données n'est joignable que par Mattermost ; le bridge passe par l'API Mattermost avec un compte bot aux droits limités.
 - **Utilisateurs non-root** dans les conteneurs (`USER mattermost`, utilisateur dédié pour le bridge).
 - **Images légères** basées sur Alpine / distroless pour réduire la surface d'attaque.
@@ -280,7 +304,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watc
     │   └── config.json         # Configuration Mattermost de base
     ├── nginx/
     │   ├── Dockerfile          # Nginx Alpine
-    │   └── nginx.conf          # Reverse proxy + upgrade WebSocket
+    │   └── nginx.conf          # Reverse proxy + upgrade WebSocket + status.localhost
+    ├── status/
+    │   ├── Dockerfile          # Gatus, utilisateur non-root
+    │   └── config.yaml         # Vérifications de la page de statut
     └── bridge/
         ├── Dockerfile              # Build multi-stage, utilisateur non-root, healthcheck
         ├── package.json            # discord.js (+ TypeScript, emoji-datasource au build)
@@ -291,7 +318,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watc
             ├── polls.ts            # Sondages synchronisés
             ├── mattermost.ts       # Client API REST + WebSocket Mattermost
             ├── store.ts            # Correspondance des IDs de messages (volume /data)
-            └── http.ts             # Healthcheck et boutons de vote
+            └── http.ts             # /health (Docker, page de statut) et boutons de vote
 ```
 
 ---

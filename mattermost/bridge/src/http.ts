@@ -4,7 +4,7 @@ import { log } from './log.js';
 const MAX_BODY = 64 * 1024;
 
 interface Handlers {
-  healthy: () => boolean;
+  status: () => { discord: boolean; mattermost: boolean };
   /** Boutons interactifs Mattermost (votes des sondages) */
   action: (body: object) => Promise<object>;
 }
@@ -22,13 +22,17 @@ async function readJson(req: IncomingMessage): Promise<object> {
   return body;
 }
 
-/** Serveur HTTP interne : healthcheck Docker et callbacks des boutons Mattermost. */
+/** Serveur HTTP interne : healthcheck Docker / page de statut et callbacks des boutons Mattermost. */
 export function startHttp(port: number, handlers: Handlers): void {
   const server = createServer(async (req, res) => {
     try {
       if (req.method === 'GET' && req.url === '/health') {
-        const ok = handlers.healthy();
-        res.writeHead(ok ? 200 : 503, { 'Content-Type': 'text/plain' }).end(ok ? 'ok' : 'starting');
+        // Détail par connexion, lu par la page de statut ; 503 tant que l'une des deux est coupée
+        const status = handlers.status();
+        const ok = status.discord && status.mattermost;
+        res
+          .writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json' })
+          .end(JSON.stringify({ status: ok ? 'UP' : 'DOWN', ...status }));
       } else if (req.method === 'POST' && req.url === '/mattermost/actions') {
         const result = await handlers.action(await readJson(req));
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(result));

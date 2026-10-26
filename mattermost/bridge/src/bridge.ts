@@ -70,8 +70,8 @@ export class Bridge {
     readonly store: Store,
   ) {}
 
-  healthy(): boolean {
-    return this.discord.isReady() && this.mm.connected;
+  status(): { discord: boolean; mattermost: boolean } {
+    return { discord: this.discord.isReady(), mattermost: this.mm.connected };
   }
 
   async start(): Promise<void> {

@@ -19,6 +19,7 @@ volumes:
   mm-logs:
   mm-plugins:
   bridge-data:
+  status-data:
 
 services:
   db:
@@ -107,3 +108,13 @@ services:
     depends_on:
       mattermost:
         condition: service_healthy
+
+  # Page de statut (Gatus), servie par Nginx sur http://status.localhost
+  status:
+    <<: *common
+    build:
+      context: ./mattermost/status
+    volumes:
+      - status-data:/data
+    networks:
+      - frontend

@@ -9,7 +9,7 @@ const store = new Store(config.dataFile);
 const bridge = new Bridge(new Mattermost(config.mattermost.url, config.mattermost.token), store);
 
 startHttp(config.http.port, {
-  healthy: () => bridge.healthy(),
+  status: () => bridge.status(),
   action: (body) => bridge.polls.handleAction(body),
 });
 
