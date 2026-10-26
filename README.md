@@ -51,13 +51,14 @@ flowchart LR
     end
 
     subgraph frontend
-        bridge[Matterbridge]
+        bridge[Bridge Node.js<br/>:8080]
     end
 
     nginx --> mattermost
     mattermost --> db
     bridge -->|API + WebSocket| mattermost
-    bridge -->|Gateway Discord| discord([Discord])
+    mattermost -.->|boutons des sondages| bridge
+    bridge -->|Gateway + webhook Discord| discord([Discord])
 ```
 
 Principes :
@@ -76,9 +77,9 @@ Principes :
 | `db`         | `postgres:15-alpine`                                    | Base de données de Mattermost                           | `backend`                |
 | `mattermost` | `mattermost/mattermost-enterprise-edition:release-9.11` | Serveur de messagerie (API + WebSocket sur `:8065`)     | `frontend`, `backend`    |
 | `nginx`      | `nginx:alpine`                                          | Reverse proxy, point d'entrée unique, upgrade WebSocket | `frontend`               |
-| `bridge`     | `42wim/matterbridge:1.26.0`                             | Relais des messages Mattermost ⇄ Discord                | `frontend`               |
+| `bridge`     | `node:24-alpine` (bridge maison en TypeScript)          | Relais Mattermost ⇄ Discord (messages, réactions, fichiers, sondages…) | `frontend` |
 
-Volumes persistants : `db-data`, `mm-data`, `mm-config`, `mm-logs`, `mm-plugins`.
+Volumes persistants : `db-data`, `mm-data`, `mm-config`, `mm-logs`, `mm-plugins`, `bridge-data` (correspondance des IDs de messages entre les deux plateformes).
 
 ---
 
@@ -139,6 +140,15 @@ Mattermost lit directement les variables préfixées `MM_` pour surcharger son `
 
 > ⚠️ Le mot de passe apparaît à la fois dans `POSTGRES_PASSWORD` et dans `MM_SQLSETTINGS_DATASOURCE` : les deux doivent rester identiques.
 
+Quatre réglages nécessaires au bridge sont fixés directement dans `docker-compose.yml` (ils ne sont donc plus modifiables depuis la console système) :
+
+| Variable                                               | Rôle                                                           |
+| ------------------------------------------------------ | -------------------------------------------------------------- |
+| `MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE=true`   | Afficher le pseudo Discord de l'auteur                         |
+| `MM_SERVICESETTINGS_ENABLEPOSTICONOVERRIDE=true`       | Afficher l'avatar Discord de l'auteur                          |
+| `MM_SERVICESETTINGS_ENABLELINKPREVIEWS=true`           | Aperçu des liens, dont les GIF Tenor/Giphy envoyés depuis Discord |
+| `MM_SERVICESETTINGS_ALLOWEDUNTRUSTEDINTERNALCONNECTIONS=bridge` | Autoriser Mattermost à appeler le bridge (boutons des sondages) |
+
 ### Nginx
 
 | Variable     | Description                     | Exemple |
@@ -156,20 +166,40 @@ Mattermost lit directement les variables préfixées `MM_` pour surcharger son `
 | `MATTERMOST_TEAM`      | Nom de l'équipe Mattermost                 |
 | `MATTERMOST_CHANNEL`   | Canal Mattermost relié (ex. `town-square`) |
 
+Variables optionnelles : `BRIDGE_DEBUG=true` (logs détaillés), `TZ` (fuseau des dates affichées dans les sondages, `Europe/Paris` par défaut).
+
 ---
 
 ## Configurer le bridge Discord
 
-Le bridge repose sur [Matterbridge](https://github.com/42wim/matterbridge), qui supporte nativement Mattermost et Discord. La configuration se trouve dans [`mattermost/bridge/matterbridge.toml.tmpl`](mattermost/bridge/matterbridge.toml.tmpl) (Matterbridge n'accepte que le format TOML). Au démarrage, `entrypoint.sh` vérifie que les variables du `.env` sont renseignées puis les injecte dans le template avec `envsubst` : les secrets ne sont jamais écrits dans le dépôt.
+Le bridge est un service Node.js / TypeScript écrit pour ce projet ([`mattermost/bridge/src`](mattermost/bridge/src)), basé sur [discord.js](https://discord.js.org) et l'API REST + WebSocket de Mattermost. Il remplace Matterbridge, qui n'est plus maintenu et ne relaie ni les réactions, ni les stickers, ni les sondages. Au démarrage, il vérifie que les variables du `.env` sont renseignées : les secrets ne sont jamais écrits dans le dépôt.
 
-Le bridge parle directement à `mattermost:8065` via le réseau `frontend` ; il n'a pas accès au réseau `backend` (base de données).
+Le bridge parle directement à `mattermost:8065` via le réseau `frontend` ; il n'a pas accès au réseau `backend` (base de données). Il expose le port `8080` sur ce réseau uniquement (healthcheck et boutons de vote), sans le publier sur l'hôte.
+
+### Ce qui est relayé
+
+| Fonctionnalité         | Discord → Mattermost                                                         | Mattermost → Discord                                                                  |
+| ---------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Messages               | ✅ avec le pseudo et l'avatar Discord                                         | ✅ via webhook, avec le pseudo Mattermost                                              |
+| Modifications / suppressions | ✅                                                                     | ✅                                                                                     |
+| Réponses               | ✅ réponse dans le fil du message cité                                        | ✅ ligne « ↪ En réponse à … » avec lien vers le message (les webhooks Discord ne peuvent pas répondre nativement) |
+| Réactions              | ✅ ajout et retrait (portées par le bot Mattermost)                           | ✅ ajout et retrait (portées par le bot Discord)                                       |
+| Images, vidéos, fichiers | ✅ ré-uploadés dans Mattermost (les liens du CDN Discord expirent), jusqu'à 50 Mo | ✅ ré-uploadés dans Discord, dans la limite du serveur (10 Mo, 50/100 Mo selon les boosts) |
+| Messages audio         | ✅ message vocal ré-uploadé en `.ogg` avec sa durée                           | ✅ fichier audio ; un fichier Ogg/Opus seul devient un message vocal Discord            |
+| GIF                    | ✅ lien Tenor/Giphy avec aperçu, ou fichier GIF ré-uploadé                     | ✅ les GIF du sélecteur Mattermost sont envoyés en lien et intégrés par Discord        |
+| Stickers               | ✅ image du sticker (PNG/APNG/GIF) ; nom seul pour les stickers animés Lottie | — (Mattermost n'a pas de stickers)                                                    |
+| Sondages               | ✅ sondage natif → post avec boutons de vote, résultats mis à jour en direct  | ✅ `!sondage Question ? \| Réponse 1 \| Réponse 2` crée un sondage natif Discord (24 h, `!sondage+` pour plusieurs réponses) |
+
+Pour les sondages, chaque côté vote avec ses propres outils (sondage natif sur Discord, boutons sur Mattermost) : le post Mattermost affiche le total des deux, et un message sous le sondage Discord affiche les votes venus de Mattermost.
+
+Limites connues : une réaction relayée apparaît au nom du bot et non de l'utilisateur d'origine ; les emoji personnalisés ne passent que s'ils existent sous le même nom des deux côtés.
 
 ### 1. Créer le bot Discord
 
 1. Aller sur le [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**.
 2. Onglet **Bot** → **Reset Token** et copier le token dans `DISCORD_TOKEN`.
-3. Activer **Message Content Intent** et **Server Members Intent**.
-4. Onglet **OAuth2 → URL Generator** : cocher `bot`, puis les permissions _Read Messages/View Channels_, _Send Messages_, _Read Message History_, _Manage Webhooks_ (optionnel, pour afficher le pseudo et l'avatar d'origine).
+3. Activer **Message Content Intent**.
+4. Onglet **OAuth2 → URL Generator** : cocher `bot`, puis les permissions _View Channels_, _Send Messages_, _Read Message History_, _Add Reactions_, _Attach Files_, _Embed Links_, _Manage Webhooks_ (obligatoire : affichage du pseudo Mattermost) et _Manage Messages_ (optionnel : relayer sur Discord la suppression d'un message Discord faite depuis Mattermost).
 5. Ouvrir l'URL générée et inviter le bot sur votre serveur.
 6. Récupérer l'ID du serveur (mode développeur Discord → clic droit sur le serveur → _Copier l'identifiant_) dans `DISCORD_SERVER`.
 
@@ -189,7 +219,7 @@ docker compose up -d bridge
 docker compose logs -f bridge
 ```
 
-Un message posté dans le canal Mattermost doit apparaître dans le salon Discord, et inversement.
+Un message posté dans le canal Mattermost doit apparaître dans le salon Discord, et inversement. Les logs indiquent `Mattermost : WebSocket connecté` et `Discord : connecté en tant que …` ; `docker compose ps` affiche le bridge `healthy` quand les deux connexions sont établies.
 
 ---
 
@@ -217,7 +247,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watc
 | **Networking**               | Réseaux `frontend` et `backend` séparés ; seul Nginx publie un port ; la base n'est jamais exposée.                                      |
 | **Healthchecks**             | `pg_isready` pour PostgreSQL, `/api/v4/system/ping` pour Mattermost, requête HTTP pour Nginx ; `depends_on: condition: service_healthy`. |
 | **Images personnalisées**    | Un `Dockerfile` par service dans `mattermost/<service>/` (healthcheck embarqué, utilisateur non-root, configuration intégrée).           |
-| **Multi-stage build**        | Image du bridge compilée depuis les sources Go dans un stage `builder`, puis copiée dans une image finale minimale sans toolchain.       |
+| **Multi-stage build**        | Bridge compilé (TypeScript → JS, table d'emoji générée) dans un stage `builder` ; l'image finale ne contient que le JS et les dépendances de production. |
 | **Cgroups**                  | Limites `cpus`, `memory` et `pids_limit` par service pour éviter qu'un service n'affame les autres.                                      |
 | **Compose Watch**            | Rechargement automatique de la configuration en développement (`develop.watch`).                                                         |
 
@@ -252,9 +282,16 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watc
     │   ├── Dockerfile          # Nginx Alpine
     │   └── nginx.conf          # Reverse proxy + upgrade WebSocket
     └── bridge/
-        ├── Dockerfile              # Matterbridge, utilisateur non-root
-        ├── entrypoint.sh           # Vérifie le .env et génère la config
-        └── matterbridge.toml.tmpl  # Passerelle Mattermost ⇄ Discord (template)
+        ├── Dockerfile              # Build multi-stage, utilisateur non-root, healthcheck
+        ├── package.json            # discord.js (+ TypeScript, emoji-datasource au build)
+        ├── scripts/build-emoji.mjs # Table nom Mattermost ⇄ emoji Unicode
+        └── src/
+            ├── index.ts            # Point d'entrée
+            ├── bridge.ts           # Relais Discord ⇄ Mattermost
+            ├── polls.ts            # Sondages synchronisés
+            ├── mattermost.ts       # Client API REST + WebSocket Mattermost
+            ├── store.ts            # Correspondance des IDs de messages (volume /data)
+            └── http.ts             # Healthcheck et boutons de vote
 ```
 
 ---

@@ -18,6 +18,7 @@ volumes:
   mm-config:
   mm-logs:
   mm-plugins:
+  bridge-data:
 
 services:
   db:
@@ -46,6 +47,12 @@ services:
       - MM_SQLSETTINGS_DRIVERNAME=${MM_SQLSETTINGS_DRIVERNAME}
       - MM_SQLSETTINGS_DATASOURCE=${MM_SQLSETTINGS_DATASOURCE}
       - MM_SERVICESETTINGS_SITEURL=${MM_SERVICESETTINGS_SITEURL}
+      # Requis par le bridge : pseudo/avatar Discord sur les messages relayés,
+      # aperçu des liens (GIF Tenor/Giphy) et boutons de vote des sondages
+      - MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE=true
+      - MM_SERVICESETTINGS_ENABLEPOSTICONOVERRIDE=true
+      - MM_SERVICESETTINGS_ENABLELINKPREVIEWS=true
+      - MM_SERVICESETTINGS_ALLOWEDUNTRUSTEDINTERNALCONNECTIONS=bridge
     volumes:
       - mm-data:/mattermost/data
       - mm-config:/mattermost/config
@@ -93,6 +100,8 @@ services:
       - MATTERMOST_BOT_TOKEN=${MATTERMOST_BOT_TOKEN:-}
       - MATTERMOST_TEAM=${MATTERMOST_TEAM:-}
       - MATTERMOST_CHANNEL=${MATTERMOST_CHANNEL:-}
+    volumes:
+      - bridge-data:/data
     networks:
       - frontend
     depends_on:

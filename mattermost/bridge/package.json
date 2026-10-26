@@ -1,0 +1,24 @@
+{
+  "name": "mattermost-discord-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bridge Mattermost ⇄ Discord : messages, réponses, réactions, fichiers, stickers et sondages",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc && node scripts/build-emoji.mjs",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "emoji-datasource": "^16.0.0",
+    "typescript": "^5.9.3"
+  }
+}

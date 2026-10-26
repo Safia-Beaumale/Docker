@@ -1,12 +1,34 @@
-FROM 42wim/matterbridge:1.26.0
+# --- Build : compilation TypeScript + génération de la table d'emoji ---
+FROM node:24-alpine AS builder
 
-# envsubst pour générer la config à partir du template + utilisateur non-root
-RUN apk add --no-cache gettext \
-  && adduser -D -H -u 1001 matterbridge
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
-COPY matterbridge.toml.tmpl /etc/matterbridge/matterbridge.toml.tmpl
-COPY --chmod=755 entrypoint.sh /entrypoint.sh
+COPY tsconfig.json ./
+COPY scripts ./scripts
+COPY src ./src
+RUN npm run build \
+  && npm prune --omit=dev
 
-USER matterbridge
+# --- Image finale : uniquement le JS compilé et les dépendances de production ---
+FROM node:24-alpine
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+
+# Correspondance des IDs de messages (volume), propriété de l'utilisateur non-root
+RUN mkdir /data && chown node:node /data
+
+USER node
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8080/health || exit 1
+
+CMD ["node", "dist/index.js"]
