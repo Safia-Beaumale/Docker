@@ -32,11 +32,12 @@ flowchart LR
 
 | Thème              | Ce que le projet met en pratique                                |
 | ------------------ | --------------------------------------------------------------- |
-| Docker Compose     | Orchestrer 5 services qui dépendent les uns des autres          |
-| Networking         | Réseaux séparés, DNS interne, un seul port exposé               |
-| Sécurité           | Secrets hors dépôt, utilisateurs non-root, isolation de la base |
-| Fonctions avancées | Fragments YAML, healthchecks, build multi-stage                 |
-| Exploitation       | Page de statut, rotation des logs, persistance par volumes      |
+| Docker Compose     | Orchestrer 5 services qui dépendent les uns des autres                        |
+| Networking         | Réseaux séparés, réseau `internal`, DNS interne, un seul port exposé          |
+| Sécurité           | Secrets hors dépôt, non-root, `cap_drop`, lecture seule, isolation de la base |
+| Fonctions avancées | Fragments YAML, healthchecks, multi-stage, cgroups, Compose Watch             |
+| Environnement      | Variables obligatoires / par défaut, stack de dev en surcharge, profils       |
+| Exploitation       | Page de statut, rotation des logs, persistance par volumes                    |
 
 ---
 
@@ -126,6 +127,7 @@ Points clés :
 
 - **Un seul port publié sur l'hôte** (Nginx). Mattermost, le bridge et Gatus ne sont joignables que par le réseau Docker.
 - **PostgreSQL est enfermé dans `backend`** : ni l'extérieur, ni Nginx, ni le bridge ne peuvent l'atteindre.
+- **`backend` est un réseau `internal: true`** : aucune route vers Internet. Même compromise, la base ne peut rien exfiltrer ni télécharger.
 - **DNS interne Docker** : les services s'appellent par leur nom (`mattermost:8065`, `bridge:8080`). Nginx utilise le résolveur `127.0.0.11` et re-résout l'adresse à chaque requête, pour ne pas renvoyer d'erreur 502 quand un conteneur est recréé.
 - **Routage par nom d'hôte** : sur le même port 80, `localhost` → Mattermost et `status.localhost` → page de statut.
 
@@ -339,15 +341,65 @@ L'image Gatus n'a pas de shell. Le dossier `/data` est préparé dans un stage A
 ```mermaid
 flowchart LR
     common["x-common: &common<br/>restart: unless-stopped<br/>logs json-file<br/>max-size 10m, max-file 3"]
+    hardened["x-hardened: &hardened<br/>no-new-privileges<br/>cap_drop: ALL"]
 
-    common -->|"<<: *common"| db & mattermost & nginx & bridge & status
+    common & hardened -->|"<<: [*common, *hardened]"| db & mattermost & nginx & bridge & status
 ```
 
-Un seul bloc définit la politique de redémarrage et la **rotation des logs** (3 fichiers de 10 Mo maximum par service, pour ne jamais saturer le disque). Tous les services en héritent.
+Deux blocs, fusionnés dans chaque service :
+
+- `x-common` : politique de redémarrage et **rotation des logs** (3 fichiers de 10 Mo maximum par service) ;
+- `x-hardened` : **durcissement** commun. Chaque service ne rajoute (`cap_add`) que les capabilities dont il a besoin.
 
 ---
 
-## 11. Supervision : la page de statut
+## 11. Cgroups : chaque service dans sa boîte
+
+```mermaid
+flowchart LR
+    subgraph limites ["deploy.resources.limits"]
+        direction TB
+        mm["mattermost<br/>2 CPU · 2 Go · 1024 pids"]
+        db["db<br/>1 CPU · 512 Mo · 200 pids"]
+        br["bridge<br/>0,5 CPU · 256 Mo · 100 pids"]
+        ng["nginx<br/>0,5 CPU · 128 Mo · 100 pids"]
+        st["status<br/>0,25 CPU · 64 Mo · 50 pids"]
+    end
+```
+
+- Une fuite mémoire dans le bridge le fait redémarrer **sans faire tomber Mattermost**.
+- La limite de processus bloque une fork bomb.
+- Preuve en direct : `docker stats` affiche la consommation face à chaque limite.
+
+---
+
+## 12. Stack de développement et Compose Watch
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watch
+```
+
+```mermaid
+flowchart LR
+    prod["docker-compose.yml<br/>référence production"]
+    dev["docker-compose.dev.yml<br/>uniquement les différences"]
+    prod & dev -->|fusion par Compose| run["stack de dev"]
+
+    nc["nginx.conf modifié"] -->|sync+restart| ng[Nginx]
+    sc["status/config.yaml modifié"] -->|sync+restart| st[Gatus]
+    ts["bridge/src/*.ts modifié"] -->|rebuild| br["Bridge<br/>(nouveau build multi-stage)"]
+```
+
+| En dev                                   | Pourquoi                                                        |
+| ---------------------------------------- | --------------------------------------------------------------- |
+| PostgreSQL, Mattermost, bridge exposés sur `127.0.0.1` | Outils SQL, tests d'API, `/health` ; jamais sur le réseau local |
+| `backend` repasse en `internal: false`   | Docker ne publie pas les ports d'un réseau interne              |
+| Logs `DEBUG`, `BRIDGE_DEBUG=true`        | Mise au point                                                    |
+| Adminer avec `--profile tools`           | Outil lancé seulement à la demande                               |
+
+---
+
+## 13. Supervision : la page de statut
 
 Gatus sonde les services toutes les 30 secondes et conserve l'historique (SQLite dans un volume).
 
@@ -367,7 +419,7 @@ Gatus n'est que sur `frontend` : **il ne touche jamais la base**. L'état de Pos
 
 ---
 
-## 12. Sécurité : défense en profondeur
+## 14. Sécurité : défense en profondeur
 
 ```mermaid
 mindmap
@@ -375,13 +427,16 @@ mindmap
     Secrets
       .env ignoré par Git
       .env.example avec valeurs factices
-      vérification des variables au démarrage
+      variables obligatoires
     Réseau
       un seul port publié
-      base isolée dans backend
+      backend internal sans Internet
       bridge limité à l'API Mattermost
     Conteneurs
       utilisateurs non-root
+      cap_drop ALL
+      no-new-privileges
+      système de fichiers en lecture seule
       images Alpine légères
       multi-stage sans outils de build
     Comptes
@@ -390,12 +445,13 @@ mindmap
     Robustesse
       healthchecks
       rotation des logs
+      limites cgroups
       taille des fichiers et requêtes bornée
 ```
 
 ---
 
-## 13. Persistance des données
+## 15. Persistance des données
 
 ```mermaid
 flowchart TB
@@ -409,7 +465,7 @@ flowchart TB
 
 ---
 
-## 14. Démonstration
+## 16. Démonstration
 
 ```bash
 cp .env.example .env
@@ -429,20 +485,43 @@ docker compose ps
 4. Répondre, réagir, envoyer une image depuis Mattermost → tout arrive sur Discord.
 5. Lancer `!sondage Pizza ou burger ? | Pizza | Burger` et voter des deux côtés.
 
+### Preuves en ligne de commande
+
+| Ce qu'on prouve                     | Commande                                                          | Résultat attendu                     |
+| ----------------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
+| Fragments et variables résolus      | `docker compose config`                                           | blocs fusionnés, chaîne de connexion construite |
+| Variable obligatoire                | `POSTGRES_PASSWORD= docker compose config`                        | erreur explicite                     |
+| La base n'a pas accès à Internet    | `docker compose exec db wget -T 3 http://example.com`             | `bad address`                        |
+| La base n'est pas exposée           | `docker compose port db 5432`                                     | aucun port                           |
+| Lecture seule et non-root           | `docker compose exec bridge sh -c 'id; touch /app/x'`             | `uid=1000(node)`, `Read-only file system` |
+| Limites cgroups                     | `docker stats --no-stream`                                        | `… / 256MiB` pour le bridge          |
+| Image multi-stage légère            | `docker image ls`                                                 | image du bridge sans TypeScript      |
+
+### Démonstration de Compose Watch
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watch
+```
+
+Modifier `nginx.conf` (ou un fichier du bridge) : Compose affiche `Syncing service "nginx"` puis redémarre le service tout seul.
+
 ---
 
-## 15. Bilan et perspectives
+## 17. Bilan et perspectives
 
 **Réalisé**
 
 - Stack de 5 services orchestrés, démarrage ordonné par healthchecks.
-- Isolation réseau frontend / backend, un seul port exposé.
-- Images personnalisées, non-root, build multi-stage.
+- Isolation réseau frontend / backend (`internal`), un seul port exposé.
+- Images personnalisées, non-root, build multi-stage, `cap_drop`, lecture seule.
+- Limites cgroups (CPU, mémoire, processus) sur chaque service.
+- Stack de développement en surcharge avec Compose Watch et profil `tools`.
 - Bridge complet : messages, fils, réactions, fichiers, audio, GIF, stickers, sondages.
 - Page de statut et persistance de l'état du bridge.
 
 **Pistes d'amélioration**
 
-- Ajouter des limites cgroups (`cpus`, `memory`, `pids_limit`) par service.
 - Passer en HTTPS (certificat sur Nginx).
+- Passer les tokens en `secrets:` Docker (lecture de fichiers `*_FILE` à ajouter au bridge).
+- Ajouter la visio (plugin Mattermost Calls + `rtcd`).
 - Relier plusieurs salons, voire d'autres messageries (Slack, Teams…).

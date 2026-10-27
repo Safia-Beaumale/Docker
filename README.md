@@ -18,7 +18,7 @@ Stack Docker Compose qui déploie un serveur **Mattermost** (messagerie) et un *
 - [Sécurité](#sécurité)
 - [Structure du projet](#structure-du-projet)
 - [Commandes utiles](#commandes-utiles)
-- [Avancement](#avancement)
+- [Correspondance avec l'énoncé](#correspondance-avec-lénoncé)
 
 ---
 
@@ -125,9 +125,15 @@ docker compose ps
 
 ## Variables d'environnement
 
-Toute la configuration passe par le fichier `.env` (jamais versionné). Le fichier [`.env.example`](.env.example) sert de modèle.
+Toute la configuration passe par le fichier `.env` (jamais versionné). Le fichier [`.env.example`](.env.example) sert de modèle. Le compose utilise trois formes d'interpolation :
 
-### PostgreSQL
+| Syntaxe              | Effet                                                                        | Utilisée pour                          |
+| -------------------- | ---------------------------------------------------------------------------- | -------------------------------------- |
+| `${VAR:?message}`    | Variable **obligatoire** : `docker compose` refuse de démarrer et affiche le message | Identifiants PostgreSQL         |
+| `${VAR:-défaut}`     | Valeur par défaut si la variable est absente ou vide                          | Port, URL, version, options du bridge  |
+| `${A}:${B}@…`        | Valeur **construite** à partir d'autres variables                             | Chaîne de connexion de Mattermost      |
+
+### PostgreSQL (obligatoires)
 
 | Variable            | Description             | Exemple      |
 | ------------------- | ----------------------- | ------------ |
@@ -137,15 +143,14 @@ Toute la configuration passe par le fichier `.env` (jamais versionné). Le fichi
 
 ### Mattermost
 
-Mattermost lit directement les variables préfixées `MM_` pour surcharger son `config.json` (format `MM_<SECTION>_<CLÉ>`).
+Mattermost lit directement les variables préfixées `MM_` pour surcharger sa configuration (format `MM_<SECTION>_<CLÉ>`).
 
-| Variable                     | Description                      | Exemple                                                          |
-| ---------------------------- | -------------------------------- | ---------------------------------------------------------------- |
-| `MM_SQLSETTINGS_DRIVERNAME`  | Driver SQL                       | `postgres`                                                       |
-| `MM_SQLSETTINGS_DATASOURCE`  | Chaîne de connexion à PostgreSQL | `postgres://mmuser:change_me@db:5432/mattermost?sslmode=disable` |
-| `MM_SERVICESETTINGS_SITEURL` | URL publique du serveur          | `http://localhost`                                               |
+| Variable                     | Description                                         | Défaut             |
+| ---------------------------- | --------------------------------------------------- | ------------------ |
+| `MM_SERVICESETTINGS_SITEURL` | URL publique du serveur                             | `http://localhost` |
+| `MATTERMOST_VERSION`         | Tag de l'image Mattermost (argument de build)       | `release-9.11`     |
 
-> ⚠️ Le mot de passe apparaît à la fois dans `POSTGRES_PASSWORD` et dans `MM_SQLSETTINGS_DATASOURCE` : les deux doivent rester identiques.
+La chaîne de connexion `MM_SQLSETTINGS_DATASOURCE` est **construite par le compose** à partir des trois variables PostgreSQL : le mot de passe n'est saisi qu'une fois. Comme il est placé dans une URL, il ne doit pas contenir `@`, `/`, `:` ni `#`. D'anciennes lignes `MM_SQLSETTINGS_DRIVERNAME` / `MM_SQLSETTINGS_DATASOURCE` dans `.env` sont simplement ignorées.
 
 Quatre réglages nécessaires au bridge sont fixés directement dans `docker-compose.yml` (ils ne sont donc plus modifiables depuis la console système) :
 
@@ -158,9 +163,9 @@ Quatre réglages nécessaires au bridge sont fixés directement dans `docker-com
 
 ### Nginx
 
-| Variable     | Description                     | Exemple |
-| ------------ | ------------------------------- | ------- |
-| `NGINX_PORT` | Port exposé sur la machine hôte | `80`    |
+| Variable     | Description                     | Défaut |
+| ------------ | ------------------------------- | ------ |
+| `NGINX_PORT` | Port exposé sur la machine hôte | `80`   |
 
 ### Bridge Discord
 
@@ -173,7 +178,9 @@ Quatre réglages nécessaires au bridge sont fixés directement dans `docker-com
 | `MATTERMOST_TEAM`      | Nom de l'équipe Mattermost                 |
 | `MATTERMOST_CHANNEL`   | Canal Mattermost relié (ex. `town-square`) |
 
-Variables optionnelles : `BRIDGE_DEBUG=true` (logs détaillés), `TZ` (fuseau des dates affichées dans les sondages, `Europe/Paris` par défaut).
+Ces variables sont facultatives pour Compose (`${VAR:-}`) : le token du bot Mattermost n'existe qu'une fois Mattermost installé, le stack doit donc pouvoir démarrer sans lui. Le bridge vérifie lui-même leur présence au démarrage et s'arrête avec un message clair s'il en manque.
+
+Variables optionnelles : `BRIDGE_DEBUG=true` (logs détaillés, `false` par défaut), `TZ` (fuseau des dates affichées dans les sondages, `Europe/Paris` par défaut).
 
 ---
 
@@ -249,17 +256,42 @@ La page de statut n'est attachée qu'au réseau `frontend` : elle n'a pas accès
 
 ## Stack de développement
 
-Le fichier [`docker-compose.dev.yml`](docker-compose.dev.yml) surcharge la configuration de production pour faciliter le développement et la mise au point de la configuration :
+Le fichier [`docker-compose.dev.yml`](docker-compose.dev.yml) est une **surcharge** : Compose fusionne les deux fichiers, la production reste la référence et le fichier dev ne contient que les différences.
 
-- **Compose Watch** : modification de `nginx.conf` ou de la configuration du bridge → synchronisation et redémarrage automatique du service ;
-- ports de debug exposés (Mattermost `:8065`, PostgreSQL `:5432`) uniquement en local ;
-- logs plus verbeux et absence de limites de ressources strictes.
-
-Lancer le stack de dev :
+Lancer le stack de dev (Compose Watch actif) :
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watch
 ```
+
+Ajouter Adminer, une interface web pour PostgreSQL (profil `tools`) :
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools up --build --watch
+```
+
+### Compose Watch
+
+| Fichier modifié                          | Action          | Effet                                                         |
+| ---------------------------------------- | --------------- | ------------------------------------------------------------- |
+| `mattermost/nginx/nginx.conf`            | `sync+restart`  | Copié dans le conteneur Nginx, puis Nginx redémarre            |
+| `mattermost/status/config.yaml`          | `sync+restart`  | Nouvelle configuration de la page de statut                    |
+| `mattermost/bridge/src/`, `package.json`, `scripts/` | `rebuild` | TypeScript compilé : nouveau build multi-stage et conteneur recréé |
+
+`sync` écrit dans le conteneur : Nginx et Gatus repassent donc en `read_only: false` en dev.
+
+### Autres différences avec la production
+
+| Élément                 | Production                    | Développement                                                   |
+| ----------------------- | ----------------------------- | --------------------------------------------------------------- |
+| Réseau `backend`        | `internal: true`              | `internal: false` : Docker ne publie pas les ports d'un conteneur qui n'est que sur un réseau interne |
+| PostgreSQL              | non exposé                    | `127.0.0.1:5432` (`DEV_DB_PORT`)                                 |
+| Mattermost              | uniquement via Nginx          | aussi en direct sur `127.0.0.1:8065` (`DEV_MATTERMOST_PORT`)     |
+| Bridge                  | non exposé                    | `127.0.0.1:8080/health` (`DEV_BRIDGE_PORT`), `BRIDGE_DEBUG=true` |
+| Logs Mattermost         | niveau par défaut             | `DEBUG`                                                          |
+| Adminer                 | absent                        | `127.0.0.1:8081` avec `--profile tools` (`DEV_ADMINER_PORT`)     |
+
+Les ports de dev ne sont liés qu'à `127.0.0.1` : ils ne sont pas joignables depuis le réseau local. Les limites de ressources sont conservées, pour développer dans les mêmes conditions qu'en production.
 
 ---
 
@@ -267,25 +299,45 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watc
 
 | Fonctionnalité               | Mise en œuvre dans le projet                                                                                                             |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| **Fragments / YAML anchors** | Bloc `x-common` (`restart`, rotation des logs `json-file`) réutilisé par tous les services via `<<: *common`.                            |
-| **Networking**               | Réseaux `frontend` et `backend` séparés ; seul Nginx publie un port ; la base n'est jamais exposée.                                      |
-| **Healthchecks**             | `pg_isready` pour PostgreSQL, `/api/v4/system/ping` pour Mattermost, requête HTTP pour Nginx ; `depends_on: condition: service_healthy`. |
+| **Fragments / YAML anchors** | `x-common` (`restart`, rotation des logs) et `x-hardened` (`no-new-privileges`, `cap_drop: ALL`), combinés par `<<: [*common, *hardened]`. |
+| **Networking**               | Réseaux `frontend` et `backend` séparés, `backend` en `internal: true` ; seul Nginx publie un port ; DNS interne Docker.                  |
+| **Healthchecks**             | `pg_isready` pour PostgreSQL, `/api/v4/system/ping` pour Mattermost, requête HTTP pour Nginx, `/health` pour le bridge ; `depends_on: condition: service_healthy`. |
 | **Images personnalisées**    | Un `Dockerfile` par service dans `mattermost/<service>/` (healthcheck embarqué, utilisateur non-root, configuration intégrée).           |
-| **Multi-stage build**        | Bridge compilé (TypeScript → JS, table d'emoji générée) dans un stage `builder` ; l'image finale ne contient que le JS et les dépendances de production. |
-| **Cgroups**                  | Limites `cpus`, `memory` et `pids_limit` par service pour éviter qu'un service n'affame les autres.                                      |
-| **Compose Watch**            | Rechargement automatique de la configuration en développement (`develop.watch`).                                                         |
+| **Build args**               | Version de Mattermost choisie depuis `.env` (`MATTERMOST_VERSION` → `ARG` du Dockerfile).                                                |
+| **Multi-stage build**        | Bridge compilé (TypeScript → JS, table d'emoji générée) dans un stage `builder` ; l'image finale ne contient que le JS et les dépendances de production. Gatus : stage Alpine pour préparer `/data`. |
+| **Cgroups**                  | `deploy.resources.limits` : CPU, mémoire et nombre de processus par service (tableau ci-dessous).                                       |
+| **Compose Watch**            | `develop.watch` en dev : `sync+restart` pour les fichiers de configuration, `rebuild` pour le code du bridge.                           |
+| **Surcharge et profils**     | `docker-compose.dev.yml` fusionné avec la production ; Adminer n'est lancé qu'avec `--profile tools`.                                  |
+
+### Limites de ressources (cgroups)
+
+| Service      | CPU  | Mémoire | Processus (`pids`) |
+| ------------ | ---- | ------- | ------------------ |
+| `db`         | 1    | 512 Mo  | 200                |
+| `mattermost` | 2    | 2 Go    | 1024               |
+| `nginx`      | 0,5  | 128 Mo  | 100                |
+| `bridge`     | 0,5  | 256 Mo  | 100                |
+| `status`     | 0,25 | 64 Mo   | 50                 |
+
+Un service qui dépasse sa limite mémoire est tué et redémarré (`restart: unless-stopped`) sans affecter les autres. La limite de processus protège contre une fork bomb. `docker stats` affiche la consommation face à chaque limite.
 
 ---
 
 ## Sécurité
 
-- **Secrets hors du dépôt** : `.env` est ignoré par Git, seul `.env.example` (valeurs factices) est versionné.
-- **Surface d'exposition minimale** : un seul port publié (Nginx). Mattermost, PostgreSQL, le bridge et la page de statut ne sont accessibles que sur les réseaux internes.
-- **Isolation réseau** : la base de données n'est joignable que par Mattermost ; le bridge passe par l'API Mattermost avec un compte bot aux droits limités.
-- **Utilisateurs non-root** dans les conteneurs (`USER mattermost`, utilisateur dédié pour le bridge).
-- **Images légères** basées sur Alpine / distroless pour réduire la surface d'attaque.
+- **Secrets hors du dépôt** : `.env` est ignoré par Git, seul `.env.example` (valeurs factices) est versionné. Les variables indispensables sont obligatoires (`${VAR:?}`).
+- **Surface d'exposition minimale** : un seul port publié (Nginx). Mattermost, PostgreSQL, le bridge et la page de statut ne sont accessibles que sur les réseaux Docker.
+- **Isolation réseau** : `backend` est un réseau `internal` ; la base n'est joignable que par Mattermost et n'a aucun accès à Internet. Le bridge passe par l'API Mattermost avec un compte bot aux droits limités.
+- **Aucune capability par défaut** : `cap_drop: ALL` sur tous les services. Seuls PostgreSQL (changement d'utilisateur au démarrage) et Nginx (port 80, workers non-root) en récupèrent quelques-unes, listées explicitement.
+- **`no-new-privileges`** : un processus ne peut pas obtenir plus de droits via un binaire setuid.
+- **Système de fichiers en lecture seule** (`read_only: true`) pour Nginx, le bridge et Gatus ; seuls les volumes de données et des `tmpfs` en mémoire sont inscriptibles.
+- **Utilisateurs non-root** : `mattermost`, `node` pour le bridge, `nobody` pour Gatus, workers `nginx`.
+- **Images légères** basées sur Alpine ; le build multi-stage du bridge n'embarque ni compilateur ni sources.
+- **Nginx** : version masquée (`server_tokens off`), taille des requêtes bornée à 50 Mo (`client_max_body_size`).
 - **Rotation des logs** (`max-size: 10m`, `max-file: 3`) pour éviter la saturation du disque.
 - **Limites de ressources** (cgroups) pour contenir l'impact d'un service compromis ou défaillant.
+
+Piste non retenue : passer les tokens en `secrets:` Docker. Le bridge et Mattermost lisent leur configuration dans des variables d'environnement, il faudrait leur ajouter la lecture de fichiers (`*_FILE`).
 
 ---
 
@@ -294,14 +346,13 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watc
 ```text
 .
 ├── docker-compose.yml          # Stack de production
-├── docker-compose.dev.yml      # Surcharge pour le développement (watch, ports de debug)
+├── docker-compose.dev.yml      # Surcharge de développement (Watch, ports locaux, Adminer)
 ├── .env.example                # Modèle des variables d'environnement
 └── mattermost/
     ├── db/
     │   └── Dockerfile          # PostgreSQL 15 Alpine + healthcheck
     ├── mattermost/
-    │   ├── Dockerfile          # Mattermost + healthcheck, utilisateur non-root
-    │   └── config.json         # Configuration Mattermost de base
+    │   └── Dockerfile          # Mattermost (version en build arg) + healthcheck, non-root
     ├── nginx/
     │   ├── Dockerfile          # Nginx Alpine
     │   └── nginx.conf          # Reverse proxy + upgrade WebSocket + status.localhost
@@ -349,10 +400,22 @@ Observer la consommation de ressources (cgroups) :
 docker stats
 ```
 
-Inspecter un réseau et les conteneurs qui y sont attachés :
+Inspecter un réseau et les conteneurs qui y sont attachés (le préfixe est le nom du dossier du projet) :
 
 ```bash
 docker network inspect docker_backend
+```
+
+Vérifier que la base n'a pas accès à Internet (réseau interne) :
+
+```bash
+docker compose exec db wget -q -T 3 -O /dev/null http://example.com
+```
+
+Vérifier le durcissement d'un conteneur (lecture seule, capabilities, limites) :
+
+```bash
+docker compose exec bridge touch /app/test
 ```
 
 Arrêter le stack en conservant les données :
@@ -366,3 +429,24 @@ Tout supprimer, volumes compris :
 ```bash
 docker compose down -v
 ```
+
+---
+
+## Correspondance avec l'énoncé
+
+| Indicateur de complétion                                   | Où le voir dans le projet                                                                                     |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Serveur de messagerie + base de données                    | Services `mattermost` et `db`                                                                                 |
+| Au moins un bridge vers un autre service                   | Service `bridge` (Discord), [`mattermost/bridge/src`](mattermost/bridge/src)                                  |
+| Service supplémentaire                                     | Page de statut Gatus (`status`)                                                                               |
+| Installable en peu de configuration                        | `cp .env.example .env` puis `docker compose up -d --build`                                                    |
+| Usage intelligent des variables d'environnement            | `${VAR:?}`, `${VAR:-défaut}`, chaîne de connexion construite, version Mattermost en build arg                 |
+| Communication entre services sans compromettre la sécurité | Réseaux `frontend` / `backend` (`internal`), un seul port publié, compte bot dédié, `cap_drop`, `read_only`   |
+| Images Docker modifiées                                    | Un `Dockerfile` par service : healthcheck, non-root, configuration intégrée                                   |
+| Stack alternatif de développement / configuration          | [`docker-compose.dev.yml`](docker-compose.dev.yml) : Watch, ports locaux, logs debug, profil `tools`           |
+| Watch                                                      | `develop.watch` : `sync+restart` (Nginx, Gatus) et `rebuild` (bridge)                                         |
+| Networking                                                 | Deux réseaux, `internal: true`, DNS interne, routage par nom d'hôte dans Nginx                                |
+| Fragments                                                  | `x-common` et `x-hardened`                                                                                    |
+| Cgroups                                                    | `deploy.resources.limits` (CPU, mémoire, pids) sur chaque service                                             |
+| Multi-stage                                                | [`mattermost/bridge/Dockerfile`](mattermost/bridge/Dockerfile), [`mattermost/status/Dockerfile`](mattermost/status/Dockerfile) |
+| Healthcheck                                                | Tous les services applicatifs, démarrage ordonné par `service_healthy`                                        |
