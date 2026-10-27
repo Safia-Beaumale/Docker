@@ -6,11 +6,21 @@ x-common: &common
       max-size: "10m"
       max-file: "3"
 
+# Durcissement commun : aucun gain de privilèges (setuid) et aucune capability
+# Linux par défaut. Chaque service ne rajoute que ce dont il a besoin.
+x-hardened: &hardened
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 networks:
   frontend:
     driver: bridge
+  # Réseau interne : aucun accès vers ou depuis l'extérieur, ni port publiable
   backend:
     driver: bridge
+    internal: true
 
 volumes:
   db-data:
@@ -23,31 +33,49 @@ volumes:
 
 services:
   db:
-    <<: *common
+    <<: [*common, *hardened]
     build:
       context: ./mattermost/db
+    # L'entrypoint démarre en root puis passe à l'utilisateur postgres
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
     environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER:?POSTGRES_USER doit être défini dans .env}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD doit être défini dans .env}
+      - POSTGRES_DB=${POSTGRES_DB:?POSTGRES_DB doit être défini dans .env}
     volumes:
       - db-data:/var/lib/postgresql/data
     networks:
       - backend
+    shm_size: 128m
+    deploy:
+      resources:
+        limits:
+          pids: 200
+          cpus: "1"
+          memory: 512M
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   mattermost:
-    <<: *common
+    <<: [*common, *hardened]
     build:
       context: ./mattermost/mattermost
+      args:
+        MATTERMOST_VERSION: ${MATTERMOST_VERSION:-release-9.11}
     environment:
-      - MM_SQLSETTINGS_DRIVERNAME=${MM_SQLSETTINGS_DRIVERNAME}
-      - MM_SQLSETTINGS_DATASOURCE=${MM_SQLSETTINGS_DATASOURCE}
-      - MM_SERVICESETTINGS_SITEURL=${MM_SERVICESETTINGS_SITEURL}
+      # Chaîne de connexion construite à partir des variables PostgreSQL :
+      # le mot de passe n'est saisi qu'une seule fois dans .env
+      - MM_SQLSETTINGS_DRIVERNAME=postgres
+      - MM_SQLSETTINGS_DATASOURCE=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable&connect_timeout=10
+      - MM_SERVICESETTINGS_SITEURL=${MM_SERVICESETTINGS_SITEURL:-http://localhost}
       # Requis par le bridge : pseudo/avatar Discord sur les messages relayés,
       # aperçu des liens (GIF Tenor/Giphy) et boutons de vote des sondages
       - MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE=true
@@ -62,6 +90,12 @@ services:
     networks:
       - frontend
       - backend
+    deploy:
+      resources:
+        limits:
+          pids: 1024
+          cpus: "2"
+          memory: 2G
     depends_on:
       db:
         condition: service_healthy
@@ -70,17 +104,33 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+      start_period: 60s
 
   nginx:
-    <<: *common
+    <<: [*common, *hardened]
     build:
       context: ./mattermost/nginx
+    # Le processus maître écoute sur le port 80 puis lance les workers en utilisateur nginx
+    cap_add:
+      - CHOWN
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
+    # Système de fichiers en lecture seule : seuls le cache et le PID sont en mémoire
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
     ports:
-      - "${NGINX_PORT}:80"
-    volumes:
-      - ./mattermost/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - "${NGINX_PORT:-80}:80"
     networks:
       - frontend
+    deploy:
+      resources:
+        limits:
+          pids: 100
+          cpus: "0.5"
+          memory: 128M
     depends_on:
       mattermost:
         condition: service_healthy
@@ -91,9 +141,12 @@ services:
       retries: 3
 
   bridge:
-    <<: *common
+    <<: [*common, *hardened]
     build:
       context: ./mattermost/bridge
+    # Les variables Discord / Mattermost restent facultatives pour Compose :
+    # le token du bot Mattermost n'existe qu'une fois Mattermost installé.
+    # Le bridge vérifie lui-même leur présence au démarrage.
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN:-}
       - DISCORD_SERVER=${DISCORD_SERVER:-}
@@ -101,20 +154,38 @@ services:
       - MATTERMOST_BOT_TOKEN=${MATTERMOST_BOT_TOKEN:-}
       - MATTERMOST_TEAM=${MATTERMOST_TEAM:-}
       - MATTERMOST_CHANNEL=${MATTERMOST_CHANNEL:-}
+      - BRIDGE_DEBUG=${BRIDGE_DEBUG:-false}
+      - TZ=${TZ:-Europe/Paris}
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - bridge-data:/data
     networks:
       - frontend
+    deploy:
+      resources:
+        limits:
+          pids: 100
+          cpus: "0.5"
+          memory: 256M
     depends_on:
       mattermost:
         condition: service_healthy
 
   # Page de statut (Gatus), servie par Nginx sur http://status.localhost
   status:
-    <<: *common
+    <<: [*common, *hardened]
     build:
       context: ./mattermost/status
+    read_only: true
     volumes:
       - status-data:/data
     networks:
       - frontend
+    deploy:
+      resources:
+        limits:
+          pids: 50
+          cpus: "0.25"
+          memory: 64M
