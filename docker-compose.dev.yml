@@ -1,0 +1,71 @@
+# Surcharge de développement / mise au point de la configuration.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watch
+#
+# Ajouter --profile tools pour lancer aussi Adminer (http://localhost:8081).
+
+networks:
+  # Docker ne publie pas les ports d'un conteneur qui n'est que sur un réseau
+  # interne : en dev, le backend redevient un réseau bridge classique pour
+  # exposer PostgreSQL sur la machine (outils SQL, migrations…)
+  backend:
+    internal: false
+
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DEV_DB_PORT:-5432}:5432"
+
+  mattermost:
+    environment:
+      - MM_LOGSETTINGS_CONSOLELEVEL=DEBUG
+    # API Mattermost en direct, sans passer par Nginx (tests, Postman…)
+    ports:
+      - "127.0.0.1:${DEV_MATTERMOST_PORT:-8065}:8065"
+
+  nginx:
+    # Compose Watch copie les fichiers dans le conteneur : il doit être inscriptible
+    read_only: false
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./mattermost/nginx/nginx.conf
+          target: /etc/nginx/nginx.conf
+
+  bridge:
+    environment:
+      - BRIDGE_DEBUG=true
+    # /health et les boutons de vote, pour tester le bridge depuis la machine
+    ports:
+      - "127.0.0.1:${DEV_BRIDGE_PORT:-8080}:8080"
+    develop:
+      watch:
+        # TypeScript compilé : toute modification relance le build multi-stage
+        - action: rebuild
+          path: ./mattermost/bridge/src
+        - action: rebuild
+          path: ./mattermost/bridge/package.json
+        - action: rebuild
+          path: ./mattermost/bridge/scripts
+
+  status:
+    read_only: false
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./mattermost/status/config.yaml
+          target: /config/config.yaml
+
+  # Interface web pour PostgreSQL, uniquement avec --profile tools
+  adminer:
+    image: adminer:5
+    profiles: [tools]
+    environment:
+      - ADMINER_DEFAULT_SERVER=db
+    networks:
+      - backend
+    ports:
+      - "127.0.0.1:${DEV_ADMINER_PORT:-8081}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
